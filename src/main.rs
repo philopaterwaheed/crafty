@@ -1,5 +1,9 @@
 use clap::{Parser, Subcommand};
+use regex::Regex;
+
+use reqwest::blocking::get;
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 use std::{
     collections::HashSet,
     fs::{self, File},
@@ -25,6 +29,8 @@ enum Commands {
     Search { keyword: String },
     /// Remove a package from the system
     Remove { package: String },
+    /// List all packages available in the ArchCraft GitHub repository
+    List,
 }
 
 #[derive(Serialize, Deserialize, Debug, Default)]
@@ -82,6 +88,7 @@ fn main() {
         Commands::Upgrade { package } => upgrade_package(package.as_deref().unwrap_or("")),
         Commands::Search { keyword } => search_repo(keyword),
         Commands::Remove { package } => remove_package(package),
+        Commands::List => list_packages(),
     }
 }
 
@@ -162,7 +169,7 @@ fn install_package(pkg: &str) {
 
 fn upgrade_package(pkg: &str) {
     let db = PackageDb::load();
-    if pkg == "" {
+    if pkg.is_empty() {
         for installed_pkg in db.packages.iter() {
             println!("Upgrading {}", installed_pkg);
             install_package(installed_pkg);
@@ -177,10 +184,16 @@ fn upgrade_package(pkg: &str) {
 
 fn search_repo(keyword: &str) {
     println!("Searching for '{}' in ArchCraft GitHub...", keyword);
-    if let Some(packages) = find_package_file(keyword) {
-        println!("Found packages: {:?}", packages);
-    } else {
-        println!("No packages found for '{}'", keyword);
+    match find_packages_by_keyword(keyword) {
+        Some(packages) if !packages.is_empty() => {
+            println!("Found packages:");
+            for pkg in packages {
+                println!("- {}", pkg);
+            }
+        }
+        _ => {
+            println!("No packages found for '{}'", keyword);
+        }
     }
 }
 
@@ -203,6 +216,21 @@ fn remove_package(pkg: &str) {
     }
 }
 
+fn list_packages() {
+    println!("Fetching package list from ArchCraft GitHub...");
+    match get_all_packages() {
+        Some(pkgs) if !pkgs.is_empty() => {
+            println!("Available packages ({} total):", pkgs.len());
+            for pkg in pkgs {
+                println!("- {}", pkg);
+            }
+        }
+        _ => {
+            println!("Failed to fetch package list.");
+        }
+    }
+}
+
 // Helper function to validate if a file is a valid zstd archive
 fn is_valid_zst(path: &str) -> bool {
     if let Ok(magic) = fs::read(path) {
@@ -211,10 +239,6 @@ fn is_valid_zst(path: &str) -> bool {
         false
     }
 }
-
-use regex::Regex;
-use reqwest::blocking::get;
-use serde_json::Value;
 
 fn find_package_file(pkg: &str) -> Option<String> {
     let url = "https://github.com/archcraft-os/pkgs/tree/main/x86_64";
@@ -233,7 +257,7 @@ fn find_package_file(pkg: &str) -> Option<String> {
     // Navigate to tree.items
     let items = json.pointer("/payload/tree/items")?.as_array()?;
 
-    // Regex to match pkg file names like rofi-1.7.5-1-any.pkg.tar.zst
+    // Regex to match the specific package
     let re = Regex::new(&format!(
         r"^(?:archcraft-)?{}-[\d\.]+-\d+-(any|x86_64)\.pkg\.tar\.zst$",
         regex::escape(pkg)
@@ -249,4 +273,74 @@ fn find_package_file(pkg: &str) -> Option<String> {
     }
 
     None
+}
+
+fn find_packages_by_keyword(keyword: &str) -> Option<Vec<String>> {
+    let url = "https://github.com/archcraft-os/pkgs/tree/main/x86_64";
+    let resp = get(url).ok()?.text().ok()?;
+
+    // Extract the embedded JSON
+    let start_marker = r#"<script type="application/json" data-target="react-app.embeddedData">"#;
+    let end_marker = "</script>";
+
+    let start = resp.find(start_marker)? + start_marker.len();
+    let end = resp[start..].find(end_marker)? + start;
+
+    let json_str = &resp[start..end];
+    let json: Value = serde_json::from_str(json_str).ok()?;
+
+    // Navigate to tree.items
+    let items = json.pointer("/payload/tree/items")?.as_array()?;
+
+    // Regex to match package files and extract package name
+    let pkg_re = Regex::new(r"^(?P<pkg_name>.+)-[\d\.]+-\d+-(any|x86_64)\.pkg\.tar\.zst$").ok()?;
+
+    let mut matching_packages = Vec::new();
+    for item in items {
+        if let Some(name) = item.get("name").and_then(|n| n.as_str()) {
+            if let Some(captures) = pkg_re.captures(name) {
+                if let Some(pkg_name) = captures.name("pkg_name") {
+                    // Search only in the package name part (without version and extension)
+                    if pkg_name.as_str().to_lowercase().contains(&keyword.to_lowercase()) {
+                        matching_packages.push(name.to_string());
+                    }
+                }
+            }
+        }
+    }
+
+    Some(matching_packages)
+}
+
+fn get_all_packages() -> Option<Vec<String>> {
+    let url = "https://github.com/archcraft-os/pkgs/tree/main/x86_64";
+    let resp = get(url).ok()?.text().ok()?;
+
+    // Extract the embedded JSON
+    let start_marker = r#"<script type="application/json" data-target="react-app.embeddedData">"#;
+    let end_marker = "</script>";
+
+    let start = resp.find(start_marker)? + start_marker.len();
+    let end = resp[start..].find(end_marker)? + start;
+
+    let json_str = &resp[start..end];
+    let json: Value = serde_json::from_str(json_str).ok()?;
+
+    // Navigate to tree.items
+    let items = json.pointer("/payload/tree/items")?.as_array()?;
+
+    // Regex to match package files
+    let pkg_re = Regex::new(r"^(.+)-[\d\.]+-\d+-(any|x86_64)\.pkg\.tar\.zst$").ok()?;
+
+    let packages: Vec<String> = items
+        .iter()
+        .filter_map(|item| {
+            item.get("name")
+                .and_then(|n| n.as_str())
+                .filter(|name| pkg_re.is_match(name))
+                .map(|s| s.to_string())
+        })
+        .collect();
+
+    Some(packages)
 }
