@@ -235,7 +235,7 @@ fn find_package_file(pkg: &str) -> Option<String> {
 
     // Regex to match pkg file names like rofi-1.7.5-1-any.pkg.tar.zst
     let re = Regex::new(&format!(
-        r"^(?:archcraft-)?{}-[\d\.-]+-any\.pkg\.tar\.zst$",
+        r"^(?:archcraft-)?{}-[\d\.]+-\d+-(any|x86_64)\.pkg\.tar\.zst$",
         regex::escape(pkg)
     ))
     .ok()?;
