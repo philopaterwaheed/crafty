@@ -6,7 +6,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::{
     collections::HashSet,
-    fs::{self, File},
+    fs::{self},
     path::PathBuf,
     process::Command,
 };
@@ -275,7 +275,7 @@ fn find_package_file(pkg: &str) -> Option<String> {
     None
 }
 
-fn find_packages_by_keyword(keyword: &str) -> Option<Vec<String>> {
+fn fetch_json_from_github() -> Option<Value> {
     let url = "https://github.com/archcraft-os/pkgs/tree/main/x86_64";
     let resp = get(url).ok()?.text().ok()?;
 
@@ -291,18 +291,24 @@ fn find_packages_by_keyword(keyword: &str) -> Option<Vec<String>> {
 
     // Navigate to tree.items
     let items = json.pointer("/payload/tree/items")?.as_array()?;
+    Some(Value::Array(items.clone()))
+}
+fn find_packages_by_keyword(keyword: &str) -> Option<Vec<String>> {
 
+    let Some(items) = fetch_json_from_github() else { return None; };
     // Regex to match package files and extract package name
     let pkg_re = Regex::new(r"^(?P<pkg_name>.+)-[\d\.]+-\d+-(any|x86_64)\.pkg\.tar\.zst$").ok()?;
 
     let mut matching_packages = Vec::new();
-    for item in items {
-        if let Some(name) = item.get("name").and_then(|n| n.as_str()) {
-            if let Some(captures) = pkg_re.captures(name) {
-                if let Some(pkg_name) = captures.name("pkg_name") {
-                    // Search only in the package name part (without version and extension)
-                    if pkg_name.as_str().to_lowercase().contains(&keyword.to_lowercase()) {
-                        matching_packages.push(name.to_string());
+    if let Some(array) = items.as_array() {
+        for item in array {
+            if let Some(name) = item.get("name").and_then(|n| n.as_str()) {
+                if let Some(captures) = pkg_re.captures(name) {
+                    if let Some(pkg_name) = captures.name("pkg_name") {
+                        // Search only in the package name part (without version and extension)
+                        if pkg_name.as_str().to_lowercase().contains(&keyword.to_lowercase()) {
+                            matching_packages.push(name.to_string());
+                        }
                     }
                 }
             }
@@ -313,26 +319,15 @@ fn find_packages_by_keyword(keyword: &str) -> Option<Vec<String>> {
 }
 
 fn get_all_packages() -> Option<Vec<String>> {
-    let url = "https://github.com/archcraft-os/pkgs/tree/main/x86_64";
-    let resp = get(url).ok()?.text().ok()?;
 
-    // Extract the embedded JSON
-    let start_marker = r#"<script type="application/json" data-target="react-app.embeddedData">"#;
-    let end_marker = "</script>";
-
-    let start = resp.find(start_marker)? + start_marker.len();
-    let end = resp[start..].find(end_marker)? + start;
-
-    let json_str = &resp[start..end];
-    let json: Value = serde_json::from_str(json_str).ok()?;
-
-    // Navigate to tree.items
-    let items = json.pointer("/payload/tree/items")?.as_array()?;
+    let items = fetch_json_from_github()?;
 
     // Regex to match package files
     let pkg_re = Regex::new(r"^(.+)-[\d\.]+-\d+-(any|x86_64)\.pkg\.tar\.zst$").ok()?;
 
     let packages: Vec<String> = items
+        .as_array()
+        .unwrap_or(&vec![])
         .iter()
         .filter_map(|item| {
             item.get("name")
